@@ -1267,7 +1267,7 @@ pub struct McpListToolsResponseEvent {
     pub auth_statuses: std::collections::HashMap<String, McpAuthStatus>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum McpAuthStatus {
