@@ -279,6 +279,8 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::TurnAborted(_)
                     | EventMsg::ConversationPath(_)
                     | EventMsg::UserMessage(_)
+                    | EventMsg::SubagentStarted(_)
+                    | EventMsg::SubagentStopped(_)
                     | EventMsg::ShutdownComplete
                     | EventMsg::ViewImageToolCall(_)
                     | EventMsg::EnteredReviewMode(_)

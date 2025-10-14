@@ -33,6 +33,7 @@ mod app;
 mod app_backtrack;
 mod app_event;
 mod app_event_sender;
+mod agents;
 mod ascii_animation;
 mod bottom_pane;
 mod chatwidget;
@@ -173,6 +174,61 @@ pub async fn run_main(
         }
     };
 
+    // Discover subagents from project and user directories, and merge with any CLI JSON.
+    // Precedence: project > CLI > user.
+    {
+        use crate::agents::{discover_agents, discover_user_agents};
+        use codex_core::config::SubagentDef as CoreSubagentDef;
+
+        // Project-level
+        let cwd = config.cwd.clone();
+        let mut by_name: std::collections::BTreeMap<String, CoreSubagentDef> =
+            discover_agents(&cwd)
+                .into_iter()
+                .map(|a| {
+                    (
+                        a.name.clone(),
+                        CoreSubagentDef {
+                            name: a.name,
+                            description: a.description,
+                            prompt: a.prompt,
+                            model: a.model,
+                            tools: a.tools,
+                        },
+                    )
+                })
+                .collect();
+
+        // CLI JSON (if provided)
+        if let Some(json) = &cli.agents_json {
+            match parse_cli_agents_json(json) {
+                Ok(cli_agents) => {
+                    // Only insert if not overridden by project-level
+                    for a in cli_agents.into_iter() {
+                        by_name.entry(a.name.clone()).or_insert(a);
+                    }
+                }
+                Err(e) => {
+                    #[allow(clippy::print_stderr)]
+                    eprintln!("Error parsing --agents JSON: {e}");
+                }
+            }
+        }
+
+        // User-level
+        for a in discover_user_agents().into_iter() {
+            by_name.entry(a.name.clone()).or_insert(CoreSubagentDef {
+                name: a.name,
+                description: a.description,
+                prompt: a.prompt,
+                model: a.model,
+                tools: a.tools,
+            });
+        }
+
+        config.subagents = by_name.into_values().collect();
+    }
+
     // we load config.toml here to determine project state.
     #[allow(clippy::print_stderr)]
     let config_toml = {
@@ -274,6 +330,65 @@ pub async fn run_main(
     run_ratatui_app(cli, config, active_profile, should_show_trust_screen)
         .await
         .map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+/// Parse the `--agents` JSON object into a list of subagent definitions.
+/// Shape: { "name": { description, prompt, tools?: string|string[], model?: string } }
+fn parse_cli_agents_json(json: &str) -> anyhow::Result<Vec<codex_core::config::SubagentDef>> {
+    use codex_core::config::SubagentDef;
+    use serde::Deserialize;
+    use serde_json::Value as Json;
+
+    #[derive(Debug, Deserialize)]
+    struct AgentJsonDef {
+        description: String,
+        prompt: String,
+        #[serde(default)]
+        tools: Option<serde_json::Value>,
+        #[serde(default)]
+        model: Option<String>,
+    }
+
+    let v: Json = serde_json::from_str(json)?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("--agents must be a JSON object"))?;
+
+    let mut out = Vec::new();
+    for (name, defv) in obj {
+        let def: AgentJsonDef = serde_json::from_value(defv.clone())?;
+
+        let tools_vec: Option<Vec<String>> = match def.tools {
+            None => None,
+            Some(Json::String(s)) => Some(
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect(),
+            ),
+            Some(Json::Array(arr)) => Some(
+                arr.into_iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|t| !t.is_empty())
+                    .collect(),
+            ),
+            Some(other) => {
+                return Err(anyhow::anyhow!(
+                    "invalid tools for agent `{name}`: {other:?}"
+                ))
+            }
+        };
+
+        out.push(SubagentDef {
+            name: name.to_string(),
+            description: def.description,
+            prompt: def.prompt,
+            model: def.model,
+            tools: tools_vec,
+        });
+    }
+
+    Ok(out)
 }
 
 async fn run_ratatui_app(

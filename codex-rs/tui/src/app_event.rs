@@ -87,4 +87,12 @@ pub(crate) enum AppEvent {
 
     /// Open the approval popup.
     FullScreenApprovalRequest(ApprovalRequest),
+
+    /// Set the active agent (persona) for the session.
+    /// Replaces the system prompt and optionally updates the model.
+    SetActiveAgent {
+        name: String,
+        prompt: String,
+        model: Option<String>,
+    },
 }

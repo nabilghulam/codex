@@ -1,6 +1,7 @@
 mod compact;
 mod regular;
 mod review;
+mod subagent;
 
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ use crate::state::TaskKind;
 pub(crate) use compact::CompactTask;
 pub(crate) use regular::RegularTask;
 pub(crate) use review::ReviewTask;
+pub(crate) use subagent::SubagentTask;
 
 /// Thin wrapper that exposes the parts of [`Session`] task runners need.
 #[derive(Clone)]
@@ -104,13 +106,36 @@ impl Session {
         sub_id: String,
         last_agent_message: Option<String>,
     ) {
-        let mut active = self.active_turn.lock().await;
-        if let Some(at) = active.as_mut()
-            && at.remove_task(&sub_id)
-        {
-            *active = None;
+        let (finished_kind, subagent_name_opt) = {
+            let mut active = self.active_turn.lock().await;
+            if let Some(at) = active.as_mut() {
+                let kind = at.remove_task(&sub_id);
+                // Extract subagent name while holding the turn_state lock only.
+                let subagent_name_opt = {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.take_subagent_name(&sub_id)
+                };
+                let should_clear = at.tasks.is_empty();
+                if should_clear {
+                    *active = None;
+                }
+                (kind, subagent_name_opt)
+            } else {
+                (None, None)
+            }
+        };
+
+        // For subagent tasks, emit a SubagentStopped lifecycle event with name.
+        if let Some(TaskKind::Subagent) = finished_kind {
+            let event = Event {
+                id: sub_id.clone(),
+                msg: EventMsg::SubagentStopped(codex_protocol::protocol::SubagentStoppedEvent {
+                    name: subagent_name_opt.unwrap_or_else(|| "subagent".to_string()),
+                    success: true,
+                }),
+            };
+            self.send_event(event).await;
         }
-        drop(active);
         let event = Event {
             id: sub_id,
             msg: EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }),

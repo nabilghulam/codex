@@ -1126,6 +1126,9 @@ impl ChatWidget {
             SlashCommand::New => {
                 self.app_event_tx.send(AppEvent::NewSession);
             }
+            SlashCommand::Agents => {
+                self.open_agents_popup();
+            }
             SlashCommand::Init => {
                 const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
                 self.submit_text_message(INIT_PROMPT.to_string());
@@ -1136,6 +1139,9 @@ impl ChatWidget {
             }
             SlashCommand::Review => {
                 self.open_review_popup();
+            }
+            SlashCommand::UseAgent => {
+                self.show_use_agent_prompt();
             }
             SlashCommand::Model => {
                 self.open_model_popup();
@@ -1275,6 +1281,18 @@ impl ChatWidget {
         let mut items: Vec<InputItem> = Vec::new();
 
         if !text.is_empty() {
+            if let Some((name, prompt)) = detect_subagent_intent(&text) {
+                self.codex_op_tx
+                    .send(Op::Subagent { name, prompt })
+                    .unwrap_or_else(|e| tracing::error!("failed to send op: {e}"));
+                // Persist the raw text to conversation history for traceability.
+                self.codex_op_tx
+                    .send(Op::AddToHistory { text: text.clone() })
+                    .unwrap_or_else(|e| tracing::error!("failed to send AddHistory op: {e}"));
+                self.add_to_history(history_cell::new_user_prompt(text));
+                self.needs_final_message_separator = false;
+                return;
+            }
             items.push(InputItem::Text { text: text.clone() });
         }
 
@@ -1303,6 +1321,8 @@ impl ChatWidget {
         }
         self.needs_final_message_separator = false;
     }
+
+// detect_subagent_intent helper is defined near the end of this file
 
     fn capture_ghost_snapshot(&mut self) {
         if self.ghost_snapshots_disabled {
@@ -1466,6 +1486,12 @@ impl ChatWidget {
                 self.on_entered_review_mode(review_request)
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
+            EventMsg::SubagentStarted(ev) => {
+                self.on_subagent_started(ev.name);
+            }
+            EventMsg::SubagentStopped(ev) => {
+                self.on_subagent_stopped(ev.name, ev.success);
+            }
         }
     }
 
@@ -1474,6 +1500,19 @@ impl ChatWidget {
         self.is_review_mode = true;
         let banner = format!(">> Code review started: {} <<", review.user_facing_hint);
         self.add_to_history(history_cell::new_review_status_line(banner));
+        self.request_redraw();
+    }
+
+    fn on_subagent_started(&mut self, name: String) {
+        let banner = format!(">> Subagent started: {} <<", name);
+        self.add_to_history(history_cell::new_info_event(banner, None));
+        self.request_redraw();
+    }
+
+    fn on_subagent_stopped(&mut self, name: String, success: bool) {
+        let status = if success { "completed" } else { "stopped" };
+        let banner = format!("<< Subagent {} {} >>", name, status);
+        self.add_to_history(history_cell::new_info_event(banner, None));
         self.request_redraw();
     }
 
@@ -1868,6 +1907,122 @@ impl ChatWidget {
         }
     }
 
+    /// Open a popup to choose an agent/persona. Selecting an agent replaces the
+    /// session system prompt (persona). If the agent specifies a model, update it too.
+    pub(crate) fn open_agents_popup(&mut self) {
+        // Prefer merged subagents registry (project > CLI > user). Fall back to on-disk discovery.
+        let merged = if !self.config.subagents.is_empty() {
+            Some(self.config.subagents.clone())
+        } else {
+            None
+        };
+
+        let items: Vec<SelectionItem> = if let Some(agents) = merged {
+            // Build a quick map from discovered on-disk agents for optional "Show path" action.
+            let mut path_map: std::collections::HashMap<String, std::path::PathBuf> = std::collections::HashMap::new();
+            for a in crate::agents::discover_agents(&self.config.cwd) {
+                path_map.insert(a.name.clone(), a.source_path.clone());
+            }
+            for a in crate::agents::discover_user_agents() {
+                path_map.entry(a.name.clone()).or_insert(a.source_path.clone());
+            }
+
+            agents
+                .into_iter()
+                .map(|agent| {
+                    let name = agent.name.clone();
+                    let meta = format!(
+                        "{} [model: {}, tools: {}]",
+                        agent.description,
+                        agent.model.clone().unwrap_or_else(|| "inherit".to_string()),
+                        agent
+                            .tools
+                            .as_ref()
+                            .map(|t| t.len().to_string())
+                            .unwrap_or_else(|| "all".to_string())
+                    );
+                    let desc = Some(meta);
+                    let prompt = agent.prompt.clone();
+                    let model = agent.model.clone();
+                    let name_for_action = name.clone();
+                    let prompt_for_action = prompt.clone();
+                    let model_for_action = model.clone();
+                    let mut actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SetActiveAgent {
+                            name: name_for_action.clone(),
+                            prompt: prompt_for_action.clone(),
+                            model: model_for_action.clone(),
+                        });
+                        tx.send(AppEvent::NewSession);
+                    })];
+                    if let Some(p) = path_map.get(&name) {
+                        let p2 = p.clone();
+                        actions.push(Box::new(move |tx| {
+                            tx.send(AppEvent::InsertHistoryCell(Box::new(history_cell::new_info_event(
+                                format!("Agent file: {}", p2.display()),
+                                None,
+                            ))));
+                        }));
+                    }
+                    SelectionItem { name, description: desc, is_current: false, actions, dismiss_on_select: true, ..Default::default() }
+                })
+                .collect()
+        } else {
+            let cwd = self.config.cwd.clone();
+            let available = crate::agents::discover_agents(&cwd);
+            if available.is_empty() {
+                self.add_info_message(
+                    "No agents found. Create Markdown agents in .codex/agents/*.md with YAML frontmatter".to_string(),
+                    Some("Example frontmatter: ---\\nname: reviewer\\ndescription: Reviews code\\nmodel: gpt-5-codex\\n---".to_string()),
+                );
+                return;
+            }
+            available
+                .into_iter()
+                .map(|agent| {
+                    let name = agent.name.clone();
+                    let meta = format!(
+                        "{} [model: {}, file]",
+                        agent.description,
+                        agent.model.clone().unwrap_or_else(|| "inherit".to_string()),
+                    );
+                    let desc = Some(meta);
+                    let prompt = agent.prompt.clone();
+                    let model = agent.model.clone();
+                    let name_for_action = name.clone();
+                    let prompt_for_action = prompt.clone();
+                    let model_for_action = model.clone();
+                    let mut actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SetActiveAgent {
+                            name: name_for_action.clone(),
+                            prompt: prompt_for_action.clone(),
+                            model: model_for_action.clone(),
+                        });
+                        tx.send(AppEvent::NewSession);
+                    })];
+                    let path_for_action = agent.source_path.clone();
+                    actions.push(Box::new(move |tx| {
+                        tx.send(AppEvent::InsertHistoryCell(Box::new(history_cell::new_info_event(
+                            format!("Agent file: {}", path_for_action.display()),
+                            None,
+                        ))));
+                    }));
+                    SelectionItem { name, description: desc, is_current: false, actions, dismiss_on_select: true, ..Default::default() }
+                })
+                .collect()
+        };
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Select Agent".to_string()),
+            subtitle: Some("Agents are personas that replace the system prompt".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search agents by name/description".to_string()),
+            ..Default::default()
+        });
+    }
+
     /// Forward file-search results to the bottom pane.
     pub(crate) fn apply_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
         self.bottom_pane.on_file_search_result(query, matches);
@@ -2100,6 +2255,34 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
+    pub(crate) fn show_use_agent_prompt(&mut self) {
+        let tx = self.app_event_tx.clone();
+        let view = CustomPromptView::new(
+            "Run subagent".to_string(),
+            "Enter: name: task prompt".to_string(),
+            None,
+            Box::new(move |line: String| {
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() {
+                    return;
+                }
+                let (name, prompt) = if let Some((n, rest)) = trimmed.split_once(':') {
+                    (n.trim().to_string(), rest.trim().to_string())
+                } else {
+                    let mut parts = trimmed.splitn(2, ' ');
+                    let n = parts.next().unwrap_or("").trim().to_string();
+                    let p = parts.next().unwrap_or("").trim().to_string();
+                    (n, p)
+                };
+                if name.is_empty() || prompt.is_empty() {
+                    return;
+                }
+                tx.send(AppEvent::CodexOp(Op::Subagent { name, prompt }));
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
     /// Programmatically submit a user text message as if typed in the
     /// composer. The text will be added to conversation history and sent to
     /// the agent.
@@ -2155,6 +2338,27 @@ impl WidgetRef for &ChatWidget {
         }
         self.last_rendered_width.set(Some(area.width as usize));
     }
+}
+
+fn detect_subagent_intent(text: &str) -> Option<(String, String)> {
+    let lower = text.trim().to_lowercase();
+    let patterns = [
+        ("use the ", " subagent to "),
+        ("have the ", " subagent "),
+        ("ask the ", " subagent to "),
+    ];
+    for (start, mid) in patterns {
+        if let Some(after_start) = lower.strip_prefix(start) {
+            if let Some(pos) = after_start.find(mid) {
+                let name = after_start[..pos].trim().to_string();
+                let rest = after_start[pos + mid.len()..].trim();
+                if !name.is_empty() && !rest.is_empty() {
+                    return Some((name, rest.to_string()));
+                }
+            }
+        }
+    }
+    None
 }
 
 enum Notification {

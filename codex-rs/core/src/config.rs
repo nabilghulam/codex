@@ -36,6 +36,7 @@ use codex_protocol::config_types::Verbosity;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
 use dirs::home_dir;
 use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -231,6 +232,22 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config_types::OtelConfig,
+
+    /// Session-scoped subagents registry (merged from project, user, and CLI JSON).
+    /// Empty means no subagents are defined for this session.
+    pub subagents: Vec<SubagentDef>,
+}
+
+/// A subagent definition describing a task-specific assistant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SubagentDef {
+    pub name: String,
+    pub description: String,
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>, // model alias or "inherit"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<String>>, // None => inherit all tools
 }
 
 impl Config {
@@ -1198,6 +1215,7 @@ impl Config {
                     exporter,
                 }
             },
+            subagents: Vec::new(),
         };
         Ok(config)
     }
