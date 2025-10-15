@@ -3,15 +3,20 @@
   "version": "0.0.0-dev",
   "license": "Apache-2.0",
   "bin": {
-    "codex": "bin/codex.js"
+    "codex": "bin/codex"
   },
   "type": "module",
   "engines": {
-    "node": ">=16"
+    "node": ">=18",
+    "bun": ">=1.0"
+  },
+  "scripts": {
+    "build": "bun build ./src/index.ts --target bun --outfile bin/codex",
+    "dev": "bun run ./src/index.ts"
   },
   "files": [
     "bin",
-    "vendor"
+    "src"
   ],
   "repository": {
     "type": "git",

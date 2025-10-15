@@ -4,7 +4,7 @@
 <p align="center"><code>npm i -g @openai/codex</code></p>
 
 > [!IMPORTANT]
-> This is the documentation for the _legacy_ TypeScript implementation of the Codex CLI. It has been superseded by the _Rust_ implementation. See the [README in the root of the Codex repository](https://github.com/openai/codex/blob/main/README.md) for details.
+> This directory now contains the Bun + TypeScript implementation of the Codex CLI. The Rust multitool is still available in `codex-rs`, but the packages published from this folder are compiled with [Bun](https://bun.sh/) and run entirely on Node/Bun runtimes.
 
 ![Codex demo GIF using: codex "explain this codebase to me"](../.github/demo.gif)
 
@@ -145,6 +145,19 @@ codex --approval-mode full-auto "create the fanciest todo-list app"
 That's it - Codex will scaffold a file, run it inside a sandbox, install any
 missing dependencies, and show you the live result. Approve the changes and
 they'll be committed to your working directory.
+
+### Building from source with Bun
+
+This TypeScript implementation can be built locally without Cargo. Install
+[Bun](https://bun.sh/) and then run:
+
+```bash
+bun install
+bun run build
+```
+
+The compiled CLI is emitted to `bin/codex` and can be executed directly with
+`bun run bin/codex` or via `bun run ./src/index.ts` during development.
 
 ---
 

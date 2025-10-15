@@ -1,0 +1,375 @@
+#!/usr/bin/env bun
+// @bun
+
+// src/config.ts
+import { promises as fs } from "fs";
+import { dirname, resolve } from "path";
+import os from "os";
+
+class ConfigManager {
+  path;
+  constructor(configPath) {
+    const defaultPath = resolve(os.homedir(), ".codex", "config.json");
+    this.path = configPath ? resolve(configPath) : defaultPath;
+  }
+  async load() {
+    try {
+      const raw = await fs.readFile(this.path, "utf8");
+      const data = JSON.parse(raw);
+      return data;
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return {};
+      }
+      throw error;
+    }
+  }
+  async save(data) {
+    const dir = dirname(this.path);
+    await fs.mkdir(dir, { recursive: true });
+    const normalized = {
+      ...data,
+      updatedAt: new Date().toISOString()
+    };
+    await fs.writeFile(this.path, `${JSON.stringify(normalized, null, 2)}
+`, "utf8");
+  }
+  async delete() {
+    try {
+      await fs.unlink(this.path);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
+// src/exec.ts
+import { spawn } from "child_process";
+import { resolve as resolve2 } from "path";
+async function runExec(cmd, options = {}) {
+  const cwd = options.cwd ? resolve2(options.cwd) : undefined;
+  const env = {
+    ...process.env,
+    ...options.env ?? {}
+  };
+  if (options.dryRun) {
+    process.stdout.write(`Would run: ${[cmd.command, ...cmd.args].join(" ")}
+`);
+    if (cwd) {
+      process.stdout.write(`  in ${cwd}
+`);
+    }
+    if (options.env && Object.keys(options.env).length > 0) {
+      const entries = Object.entries(options.env).map(([key, value]) => `${key}=${value}`).join(", ");
+      process.stdout.write(`  with env: ${entries}
+`);
+    }
+    return { code: 0, signal: null };
+  }
+  const child = spawn(cmd.command, cmd.args, {
+    cwd,
+    env,
+    stdio: "inherit"
+  });
+  const result = await new Promise((resolvePromise) => {
+    child.on("exit", (code, signal) => {
+      resolvePromise({ code, signal });
+    });
+    child.on("error", (error) => {
+      process.stderr.write(`${error}
+`);
+      resolvePromise({ code: 1, signal: null });
+    });
+  });
+  return result;
+}
+// package.json
+var version = "0.0.0-dev";
+
+// src/cli.ts
+var HELP_TEXT = `Usage: codex [command] [options]
+
+` + `Commands:
+` + `  login [--api-key <value>] [--stdin] [--profile <name>]  Save credentials locally
+` + `  logout                                              Remove stored credentials
+` + `  status                                              Display current configuration
+` + `  exec [options] <command> [args...]                  Run a shell command using Codex tooling
+` + `  help                                                Show this help message
+
+` + `Global options:
+` + `  -h, --help             Show help
+` + `  -V, --version          Show version
+` + `  --config <path>        Use a specific config file
+` + `
+Examples:
+` + `  codex login --stdin < token.txt
+` + `  codex exec --cwd ./my-app --env NODE_ENV=development npm test
+` + `  codex status
+`;
+function parseGlobalOptions(argv) {
+  const rest = [...argv];
+  let showHelp = false;
+  let showVersion = false;
+  let configPath;
+  while (rest.length > 0) {
+    const token = rest[0];
+    if (token === "-h" || token === "--help") {
+      showHelp = true;
+      rest.shift();
+      continue;
+    }
+    if (token === "-V" || token === "--version") {
+      showVersion = true;
+      rest.shift();
+      continue;
+    }
+    if (token === "--config") {
+      rest.shift();
+      const value = rest.shift();
+      if (!value) {
+        throw new Error("Missing value for --config");
+      }
+      configPath = value;
+      continue;
+    }
+    break;
+  }
+  return {
+    configPath,
+    showHelp,
+    showVersion,
+    rest
+  };
+}
+function parseLoginArgs(args) {
+  const options = {
+    readFromStdin: false
+  };
+  const rest = [...args];
+  while (rest.length > 0) {
+    const token = rest.shift();
+    switch (token) {
+      case "--stdin": {
+        options.readFromStdin = true;
+        break;
+      }
+      case "--api-key": {
+        const value = rest.shift();
+        if (!value) {
+          throw new Error("Missing value for --api-key");
+        }
+        options.apiKey = value;
+        break;
+      }
+      case "--profile": {
+        const value = rest.shift();
+        if (!value) {
+          throw new Error("Missing value for --profile");
+        }
+        options.profile = value;
+        break;
+      }
+      default: {
+        throw new Error(`Unknown login option: ${token}`);
+      }
+    }
+  }
+  return options;
+}
+function mask(value) {
+  if (!value) {
+    return "(not set)";
+  }
+  if (value.length <= 4) {
+    return "*".repeat(value.length);
+  }
+  const visible = value.slice(-4);
+  return `${"*".repeat(value.length - 4)}${visible}`;
+}
+function parseExecArgs(args) {
+  const rest = [...args];
+  const env = {};
+  let cwd;
+  let dryRun = false;
+  while (rest.length > 0) {
+    const token = rest[0];
+    if (token === "--dry-run") {
+      dryRun = true;
+      rest.shift();
+      continue;
+    }
+    if (token === "--cwd") {
+      rest.shift();
+      const value = rest.shift();
+      if (!value) {
+        throw new Error("Missing value for --cwd");
+      }
+      cwd = value;
+      continue;
+    }
+    if (token === "--env") {
+      rest.shift();
+      const pair = rest.shift();
+      if (!pair) {
+        throw new Error("Missing value for --env");
+      }
+      const equalsIndex = pair.indexOf("=");
+      if (equalsIndex === -1) {
+        throw new Error("--env expects KEY=VALUE");
+      }
+      const key = pair.slice(0, equalsIndex);
+      const value = pair.slice(equalsIndex + 1);
+      env[key] = value;
+      continue;
+    }
+    if (token === "--") {
+      rest.shift();
+      break;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`Unknown exec option: ${token}`);
+    }
+    break;
+  }
+  if (rest.length === 0) {
+    throw new Error("exec requires a command to run");
+  }
+  const [command, ...commandArgs] = rest;
+  return {
+    cwd,
+    dryRun,
+    env,
+    command,
+    args: commandArgs
+  };
+}
+async function runLogin(manager, options) {
+  let apiKey = options.apiKey;
+  if (!apiKey && options.readFromStdin) {
+    apiKey = (await readFromStdin()).trim();
+  }
+  if (!apiKey) {
+    process.stderr.write(`Login requires either --api-key or --stdin to provide credentials.
+`);
+    return 1;
+  }
+  const previous = await manager.load();
+  const next = {
+    ...previous,
+    apiKey,
+    profile: options.profile ?? previous.profile
+  };
+  await manager.save(next);
+  process.stdout.write(`Saved credentials to ${manager.path}
+`);
+  return 0;
+}
+async function runLogout(manager) {
+  await manager.delete();
+  process.stdout.write(`Removed stored credentials.
+`);
+  return 0;
+}
+async function runStatus(manager) {
+  const data = await manager.load();
+  process.stdout.write(`Codex CLI configuration:
+`);
+  process.stdout.write(`  Config file: ${manager.path}
+`);
+  process.stdout.write(`  API key: ${mask(data.apiKey)}
+`);
+  process.stdout.write(`  Profile: ${data.profile ?? "(default)"}
+`);
+  process.stdout.write(`  Updated: ${data.updatedAt ? new Date(data.updatedAt).toISOString() : "never"}
+`);
+  return 0;
+}
+async function runExecCommand(options) {
+  const result = await runExec({ command: options.command, args: options.args }, { cwd: options.cwd, dryRun: options.dryRun, env: options.env });
+  if (result.signal) {
+    process.stderr.write(`Command terminated by signal ${result.signal}.
+`);
+    return 1;
+  }
+  return result.code ?? 1;
+}
+async function readFromStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function runCli(argv) {
+  let globalOptions;
+  try {
+    globalOptions = parseGlobalOptions(argv);
+  } catch (error) {
+    process.stderr.write(`${error.message}
+`);
+    process.stderr.write(`
+`);
+    process.stderr.write(HELP_TEXT);
+    return 1;
+  }
+  if (globalOptions.showVersion) {
+    process.stdout.write(`codex ${version}
+`);
+    return 0;
+  }
+  if (globalOptions.showHelp || globalOptions.rest.length === 0) {
+    process.stdout.write(`${HELP_TEXT}
+`);
+    return 0;
+  }
+  const [command, ...rest] = globalOptions.rest;
+  const manager = new ConfigManager(globalOptions.configPath);
+  try {
+    switch (command) {
+      case "login": {
+        const options = parseLoginArgs(rest);
+        return await runLogin(manager, options);
+      }
+      case "logout": {
+        return await runLogout(manager);
+      }
+      case "status": {
+        return await runStatus(manager);
+      }
+      case "exec": {
+        const options = parseExecArgs(rest);
+        return await runExecCommand(options);
+      }
+      case "help": {
+        process.stdout.write(`${HELP_TEXT}
+`);
+        return 0;
+      }
+      default: {
+        process.stderr.write(`Unknown command: ${command}
+`);
+        process.stderr.write(`
+`);
+        process.stderr.write(HELP_TEXT);
+        return 1;
+      }
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message}
+`);
+    return 1;
+  }
+}
+
+// src/index.ts
+var args = process.argv.slice(2);
+runCli(args).then((code) => {
+  process.exitCode = code;
+}).catch((error) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}
+`);
+  process.exitCode = 1;
+});
