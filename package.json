@@ -2,13 +2,22 @@
   "name": "codex-monorepo",
   "private": true,
   "description": "Tools for repo-wide maintenance.",
+  "workspaces": [
+    "codex-web",
+    "sdk/*"
+  ],
   "scripts": {
+    "rimraf": "rimraf",
     "dev": "node codex-cli/bin/codex.js",
+    "dev:web": "cd codex-web && bun run dev",
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
-    "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js"
+    "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
+    "clean": "rimraf -- **/node_modules bun.lock **/.turbo **/.next **/.cache"
   },
   "devDependencies": {
-    "prettier": "^3.5.3"
+    "@types/bun": "^1.3.0",
+    "prettier": "^3.5.3",
+    "rimraf": "^6.0.1"
   },
   "resolutions": {
     "braces": "^3.0.3",
