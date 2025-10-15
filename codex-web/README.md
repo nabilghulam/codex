@@ -1,7 +1,8 @@
 # Codex Web
 
-A Next.js web experience that mirrors the onboarding flow of the Codex CLI. It guides users through the same subscription-first
-authentication path with an API key fallback, demonstrating how Codex collects credentials before launching the agent.
+A Next.js web experience that mirrors the onboarding and interactive workflow of the Codex CLI. It guides users through the same
+subscription-first authentication path with an API key fallback and then launches a browser-based run loop that mimics the CLI's
+planning, diffing, and command execution stages.
 
 ## Tech stack
 
@@ -19,4 +20,4 @@ bun run dev
 ```
 
 The hosted flow is a demo: it simulates the CLI behaviour without calling production services. Use it to walk teammates through
-the authentication experience or to test UI copy.
+the authentication experience, demonstrate the planning/diff review loop, or to test UI copy.
