@@ -167,7 +167,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::StreamError(StreamErrorEvent { message }) => {
                 ts_msg!(self, "{}", message.style(self.dimmed));
             }
-            EventMsg::TaskStarted(_) => {
+            EventMsg::TaskStarted(_) | EventMsg::SubagentStarted(_) | EventMsg::SubagentStopped(_) => {
                 // Ignore.
             }
             EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) => {

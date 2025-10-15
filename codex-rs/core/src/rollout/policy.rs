@@ -70,6 +70,8 @@ pub(crate) fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::ListCustomPromptsResponse(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::ShutdownComplete
+        | EventMsg::SubagentStarted(_)
+        | EventMsg::SubagentStopped(_)
         | EventMsg::ViewImageToolCall(_)
         | EventMsg::ConversationPath(_) => false,
     }

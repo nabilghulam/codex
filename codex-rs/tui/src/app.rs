@@ -232,6 +232,19 @@ impl App {
                 self.chat_widget = ChatWidget::new(init, self.server.clone());
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::SetActiveAgent { name: _, prompt, model } => {
+                // Replace user instructions with agent prompt and disable AGENTS.md concatenation
+                self.config.user_instructions = Some(prompt);
+                self.config.project_doc_max_bytes = 0;
+                if let Some(m) = model {
+                    self.chat_widget.set_model(&m);
+                    self.config.model = m;
+                    if let Some(family) = find_family_for_model(&self.config.model) {
+                        self.config.model_family = family;
+                    }
+                }
+                // After updating config, restart session on next NewSession event
+            }
             AppEvent::InsertHistoryCell(cell) => {
                 let cell: Arc<dyn HistoryCell> = cell.into();
                 if let Some(Overlay::Transcript(t)) = &mut self.overlay {

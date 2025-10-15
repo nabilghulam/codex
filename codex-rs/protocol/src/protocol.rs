@@ -62,6 +62,14 @@ pub enum Op {
         items: Vec<InputItem>,
     },
 
+    /// Spawn a subagent to handle a task with isolated context.
+    Subagent {
+        /// Subagent name to invoke (must match a discovered subagent)
+        name: String,
+        /// Task instruction for the subagent
+        prompt: String,
+    },
+
     /// Similar to [`Op::UserInput`], but contains additional context required
     /// for a turn of a [`crate::codex_conversation::CodexConversation`].
     UserTurn {
@@ -517,6 +525,12 @@ pub enum EventMsg {
 
     ConversationPath(ConversationPathResponseEvent),
 
+    /// Entered a subagent turn with the given agent name.
+    SubagentStarted(SubagentStartedEvent),
+
+    /// Subagent turn finished.
+    SubagentStopped(SubagentStoppedEvent),
+
     /// Entered review mode.
     EnteredReviewMode(ReviewRequest),
 
@@ -527,6 +541,17 @@ pub enum EventMsg {
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 pub struct ExitedReviewModeEvent {
     pub review_output: Option<ReviewOutputEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentStartedEvent {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+pub struct SubagentStoppedEvent {
+    pub name: String,
+    pub success: bool,
 }
 
 // Individual event payload types matching each `EventMsg` variant.

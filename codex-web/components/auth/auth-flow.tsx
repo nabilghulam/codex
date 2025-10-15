@@ -10,7 +10,6 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Stepper } from "@/components/auth/stepper";
 import { AUTH_STEPS, getStepById, type StepId } from "@/lib/utils";
-import { type AuthMethod, type AuthSession, maskApiKey } from "@/lib/auth";
 
 interface LogEntry {
   id: string;
@@ -18,22 +17,20 @@ interface LogEntry {
   tone: "info" | "success" | "warning";
 }
 
-interface AuthFlowProps {
-  onSessionReady?: (session: AuthSession) => void;
-}
+type AuthMethod = "subscription" | "api-key" | null;
 
 type SubscriptionState =
   | { status: "idle"; email: string }
   | { status: "sending"; email: string }
   | { status: "link-sent"; email: string; expiresAt: string }
-  | { status: "verified"; email: string; expiresAt: string; verifiedAt: string };
+  | { status: "verified"; email: string; expiresAt: string };
 
 type ApiKeyState =
   | { status: "idle"; key: string }
   | { status: "validating"; key: string }
-  | { status: "ready"; key: string; capturedAt: string };
+  | { status: "ready"; key: string };
 
-export function AuthFlow({ onSessionReady }: AuthFlowProps) {
+export function AuthFlow() {
   const createLogId = React.useCallback(() => {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
       return crypto.randomUUID();
@@ -42,7 +39,7 @@ export function AuthFlow({ onSessionReady }: AuthFlowProps) {
   }, []);
 
   const [step, setStep] = React.useState<StepId>("method");
-  const [method, setMethod] = React.useState<AuthMethod | null>(null);
+  const [method, setMethod] = React.useState<AuthMethod>(null);
   const [subscription, setSubscription] = React.useState<SubscriptionState>({ status: "idle", email: "" });
   const [apiKey, setApiKey] = React.useState<ApiKeyState>({ status: "idle", key: "" });
   const [logs, setLogs] = React.useState<LogEntry[]>(() => [
@@ -67,7 +64,7 @@ export function AuthFlow({ onSessionReady }: AuthFlowProps) {
   );
 
   const handleMethodSelect = React.useCallback(
-    (nextMethod: AuthMethod) => {
+    (nextMethod: Exclude<AuthMethod, null>) => {
       setMethod(nextMethod);
       setStep(nextMethod === "subscription" ? "subscription" : "api-key");
       appendLog({
@@ -84,9 +81,6 @@ export function AuthFlow({ onSessionReady }: AuthFlowProps) {
   const handleSubscriptionSubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      if (subscription.status === "sending" || subscription.status === "verified") {
-        return;
-      }
       const formData = new FormData(event.currentTarget);
       const email = String(formData.get("email") ?? "").trim();
       if (!email) {
@@ -117,22 +111,17 @@ export function AuthFlow({ onSessionReady }: AuthFlowProps) {
 
   const handleSubscriptionVerify = React.useCallback(() => {
     if (subscription.status !== "link-sent") return;
-    const verifiedAt = new Date().toISOString();
-    setSubscription({ ...subscription, status: "verified", verifiedAt });
+    setSubscription({ ...subscription, status: "verified" });
     appendLog({
       message: "Subscription verified. Codex CLI will now reuse this session for authenticated requests.",
       tone: "success"
     });
     setStep("complete");
-    onSessionReady?.({ method: "subscription", email: subscription.email, verifiedAt });
-  }, [appendLog, onSessionReady, subscription]);
+  }, [appendLog, subscription]);
 
   const handleApiKeySubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      if (apiKey.status === "validating" || apiKey.status === "ready") {
-        return;
-      }
       const formData = new FormData(event.currentTarget);
       const key = String(formData.get("apiKey") ?? "").trim();
       if (!key) {
@@ -146,16 +135,14 @@ export function AuthFlow({ onSessionReady }: AuthFlowProps) {
       setApiKey({ status: "validating", key });
       appendLog({ message: "Validating your API key…", tone: "info" });
       await new Promise((resolve) => setTimeout(resolve, 800));
-      const capturedAt = new Date().toISOString();
-      setApiKey({ status: "ready", key, capturedAt });
+      setApiKey({ status: "ready", key });
       appendLog({
         message: "API key stored locally. You can now launch Codex with key-based auth.",
         tone: "success"
       });
       setStep("complete");
-      onSessionReady?.({ method: "api-key", apiKey: key, capturedAt });
     },
-    [apiKey.status, appendLog, onSessionReady]
+    [appendLog]
   );
 
   const currentStep = getStepById(step);
@@ -314,16 +301,14 @@ function SubscriptionStatus({ subscription }: SubscriptionStatusProps) {
     case "verified":
       return (
         <Alert variant="success" title="Linked">
-          Subscription authentication is active. Codex CLI will bootstrap directly into your workspace. Verified at
-          {" "}
-          <time dateTime={subscription.verifiedAt}>{new Date(subscription.verifiedAt).toLocaleTimeString()}</time>.
+          Subscription authentication is active. Codex CLI will bootstrap directly into your workspace.
         </Alert>
       );
   }
 }
 
 interface CompletionSummaryProps {
-  method: AuthMethod | null;
+  method: AuthMethod;
   subscription: SubscriptionState;
   apiKey: ApiKeyState;
 }
@@ -341,8 +326,7 @@ function CompletionSummary({ method, subscription, apiKey }: CompletionSummaryPr
         <div className="space-y-2">
           <h3 className="font-semibold">Session details</h3>
           <p className="text-sm text-muted-foreground">
-            We stored a session for <strong>{subscription.email}</strong> at {new Date(subscription.verifiedAt).toLocaleString()}.
-            The CLI reuses it automatically when you run <code>codex</code>.
+            We stored a session for <strong>{subscription.email}</strong>. The CLI reuses it automatically when you run <code>codex</code>.
           </p>
         </div>
       ) : null}
@@ -353,13 +337,10 @@ function CompletionSummary({ method, subscription, apiKey }: CompletionSummaryPr
 {`{
   "auth": {
     "provider": "openai",
-    "apiKey": "${maskApiKey(apiKey.key)}"
+    "apiKey": "${apiKey.key.replace(/.(?=.{4})/g, "*")}"
   }
 }`}
           </pre>
-          <p className="text-xs text-muted-foreground">
-            Key captured {new Date(apiKey.capturedAt).toLocaleString()} and stored locally for the CLI session.
-          </p>
         </div>
       ) : null}
       <div className="space-y-2">

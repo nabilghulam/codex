@@ -80,6 +80,7 @@ use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::InputItem;
 use crate::protocol::ListCustomPromptsResponseEvent;
+use crate::protocol::SubagentStartedEvent;
 use crate::protocol::Op;
 use crate::protocol::PatchApplyBeginEvent;
 use crate::protocol::PatchApplyEndEvent;
@@ -102,6 +103,7 @@ use crate::state::SessionServices;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
+use crate::tasks::SubagentTask;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::format_exec_output_str;
@@ -262,6 +264,12 @@ pub(crate) struct TurnContext {
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) tools_config: ToolsConfig,
     pub(crate) is_review_mode: bool,
+    /// When true, run in an isolated context (no parent history) but without
+    /// emitting review-mode events. Used for subagent turns.
+    pub(crate) is_subagent: bool,
+    /// Optional allowlist of tool names available to this turn. When None, all
+    /// tools from the router are available.
+    pub(crate) allowed_tools: Option<std::collections::HashSet<String>>,
     pub(crate) final_output_json_schema: Option<Value>,
 }
 
@@ -460,6 +468,8 @@ impl Session {
             shell_environment_policy: config.shell_environment_policy.clone(),
             cwd,
             is_review_mode: false,
+            is_subagent: false,
+            allowed_tools: None,
             final_output_json_schema: None,
         };
         let services = SessionServices {
@@ -1137,6 +1147,36 @@ async fn submission_loop(
             Op::Interrupt => {
                 sess.interrupt_task().await;
             }
+            Op::Subagent { name, prompt } => {
+                // Lookup subagent by name from the merged registry stored in config.
+                let agent_opt = config
+                    .subagents
+                    .iter()
+                    .find(|a| a.name == name)
+                    .cloned();
+                match agent_opt {
+                    Some(agent) => {
+                        // Build tools allowlist if specified on the agent.
+                        let allowed_tools = agent.tools.as_ref().map(|list| {
+                            list.iter().map(|s| map_tool_alias(s)).collect()
+                        });
+                        spawn_subagent_thread(
+                            sess.clone(),
+                            config.clone(),
+                            turn_context.clone(),
+                            agent.name.clone(),
+                            prompt.clone(),
+                            agent.model.clone(),
+                            allowed_tools,
+                        )
+                        .await;
+                    }
+                    None => {
+                        let event = Event { id: sub.id, msg: EventMsg::Error(ErrorEvent { message: format!("unknown subagent `{name}`") }) };
+                        sess.send_event(event).await;
+                    }
+                }
+            }
             Op::OverrideTurnContext {
                 cwd,
                 approval_policy,
@@ -1213,6 +1253,8 @@ async fn submission_loop(
                     shell_environment_policy: prev.shell_environment_policy.clone(),
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
+                    is_subagent: false,
+                    allowed_tools: None,
                     final_output_json_schema: None,
                 };
 
@@ -1313,6 +1355,8 @@ async fn submission_loop(
                         shell_environment_policy: turn_context.shell_environment_policy.clone(),
                         cwd,
                         is_review_mode: false,
+                        is_subagent: false,
+                        allowed_tools: None,
                         final_output_json_schema,
                     };
 
@@ -1591,6 +1635,8 @@ async fn spawn_review_thread(
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
         cwd: parent_turn_context.cwd.clone(),
         is_review_mode: true,
+        is_subagent: false,
+        allowed_tools: None,
         final_output_json_schema: None,
     };
 
@@ -1610,6 +1656,104 @@ async fn spawn_review_thread(
         msg: EventMsg::EnteredReviewMode(review_request),
     })
     .await;
+}
+
+/// Spawn a subagent thread with isolated context and optional tool allowlist.
+pub(crate) async fn spawn_subagent_thread(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    parent_turn_context: Arc<TurnContext>,
+    agent_name: String,
+    agent_prompt: String,
+    override_model: Option<String>,
+    allowed_tools: Option<std::collections::HashSet<String>>,
+) {
+    // Determine effective model
+    let (model, family) = match override_model.as_deref() {
+        None | Some("inherit") => (
+            parent_turn_context.client.get_model(),
+            parent_turn_context.client.get_model_family(),
+        ),
+        Some(m) => {
+            let fam = find_family_for_model(m).unwrap_or_else(|| config.model_family.clone());
+            (m.to_string(), fam)
+        }
+    };
+
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_family: &family,
+        include_plan_tool: config.include_plan_tool,
+        include_apply_patch_tool: config.include_apply_patch_tool,
+        include_web_search_request: config.tools_web_search_request,
+        use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
+        include_view_image_tool: config.include_view_image_tool,
+        experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+    });
+
+    let provider = parent_turn_context.client.get_provider();
+    let auth_manager = parent_turn_context.client.get_auth_manager();
+
+    // Build per‑turn client with requested model/family.
+    let mut per_turn_config = (*config).clone();
+    per_turn_config.model = model.clone();
+    per_turn_config.model_family = family.clone();
+    if let Some(model_info) = get_model_info(&family) {
+        per_turn_config.model_context_window = Some(model_info.context_window);
+    }
+
+    let otel_event_manager = parent_turn_context
+        .client
+        .get_otel_event_manager()
+        .with_model(per_turn_config.model.as_str(), per_turn_config.model_family.slug.as_str());
+
+    let per_turn_config = Arc::new(per_turn_config);
+    let client = ModelClient::new(
+        per_turn_config.clone(),
+        auth_manager,
+        otel_event_manager,
+        provider,
+        per_turn_config.model_reasoning_effort,
+        per_turn_config.model_reasoning_summary,
+        sess.conversation_id,
+    );
+
+    let sub_turn_context = TurnContext {
+        client,
+        tools_config,
+        user_instructions: None,
+        base_instructions: Some(agent_prompt.clone()),
+        approval_policy: parent_turn_context.approval_policy,
+        sandbox_policy: parent_turn_context.sandbox_policy.clone(),
+        shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
+        cwd: parent_turn_context.cwd.clone(),
+        is_review_mode: false,
+        is_subagent: true,
+        allowed_tools,
+        final_output_json_schema: None,
+    };
+
+    // Child input is the user-provided sub-task prompt.
+    let input: Vec<InputItem> = vec![InputItem::Text { text: agent_prompt }];
+    let tc = Arc::new(sub_turn_context);
+    let sub_id = sess.next_internal_sub_id();
+
+    let event = Event {
+        id: sub_id.clone(),
+        msg: EventMsg::SubagentStarted(SubagentStartedEvent { name: agent_name.clone() }),
+    };
+    sess.send_event(event).await;
+
+    // Spawn and record subagent metadata for later stop event.
+    let sub_id_clone = sub_id.clone();
+    let agent_name_clone = agent_name.clone();
+    sess.spawn_task(tc, sub_id, input, SubagentTask).await;
+    {
+        let mut active = sess.active_turn.lock().await;
+        if let Some(at) = active.as_mut() {
+            let mut ts = at.turn_state.lock().await;
+            ts.set_subagent_name(sub_id_clone, agent_name_clone);
+        }
+    }
 }
 
 /// Takes a user message as input and runs a loop where, at each turn, the model
@@ -1647,12 +1791,14 @@ pub(crate) async fn run_task(
     sess.send_event(event).await;
 
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    // For review threads, keep an isolated in-memory history so the
+    // For review and subagent threads, keep an isolated in-memory history so the
     // model sees a fresh conversation without the parent session's history.
     // For normal turns, continue recording to the session history as before.
     let is_review_mode = turn_context.is_review_mode;
+    let is_subagent = turn_context.is_subagent;
+    let isolated = is_review_mode || is_subagent;
     let mut review_thread_history: Vec<ResponseItem> = Vec::new();
-    if is_review_mode {
+    if isolated {
         // Seed review threads with environment context so the model knows the working directory.
         review_thread_history.extend(sess.build_initial_context(turn_context.as_ref()));
         review_thread_history.push(initial_input_for_turn.into());
@@ -1688,7 +1834,7 @@ pub(crate) async fn run_task(
         //   conversation history on each turn. The rollout file, however, should
         //   only record the new items that originated in this turn so that it
         //   represents an append-only log without duplicates.
-        let turn_input: Vec<ResponseItem> = if is_review_mode {
+        let turn_input: Vec<ResponseItem> = if isolated {
             if !pending_input.is_empty() {
                 review_thread_history.extend(pending_input);
             }
@@ -1954,11 +2100,52 @@ async fn run_turn(
         .get_model_family()
         .supports_parallel_tool_calls;
     let parallel_tool_calls = model_supports_parallel;
+    // Compute tool specs and apply per-turn allowlist if present.
+    let mut specs = router.specs();
+    if let Some(allow) = &turn_context.allowed_tools {
+        fn spec_name(spec: &crate::client_common::tools::ToolSpec) -> &str {
+            use crate::client_common::tools::ToolSpec as TS;
+            match spec {
+                TS::Function(t) => t.name.as_str(),
+                TS::LocalShell {} => "local_shell",
+                TS::WebSearch {} => "web_search",
+                TS::Freeform(t) => t.name.as_str(),
+            }
+        }
+        specs.retain(|s| allow.contains(spec_name(s).trim()));
+    }
+
+    // Build base instructions override with optional subagent roster for proactive delegation.
+    let base_override = if !turn_context.is_review_mode && !turn_context.is_subagent {
+        let cfg = turn_context.client.get_config_arc();
+        if !cfg.subagents.is_empty() {
+            // Compose roster in a compact line-oriented block.
+            let mut roster = String::from("\n\nSubagents available (use delegate_to_subagent when appropriate):\n");
+            for a in &cfg.subagents {
+                use std::fmt::Write as _;
+                let _ = writeln!(roster, "- {} — {}", a.name, a.description);
+            }
+            // Encourage proactive use.
+            roster.push_str(
+                "\nWhen a subagent matches the task, call the function tool 'delegate_to_subagent' with {name, prompt}.\n",
+            );
+            let base = turn_context
+                .base_instructions
+                .clone()
+                .unwrap_or_default();
+            Some(format!("{base}{roster}"))
+        } else {
+            turn_context.base_instructions.clone()
+        }
+    } else {
+        turn_context.base_instructions.clone()
+    };
+
     let prompt = Prompt {
         input,
-        tools: router.specs(),
+        tools: specs,
         parallel_tool_calls,
-        base_instructions_override: turn_context.base_instructions.clone(),
+        base_instructions_override: base_override,
         output_schema: turn_context.final_output_json_schema.clone(),
     };
 
@@ -2765,6 +2952,8 @@ mod tests {
             shell_environment_policy: config.shell_environment_policy.clone(),
             tools_config,
             is_review_mode: false,
+            is_subagent: false,
+            allowed_tools: None,
             final_output_json_schema: None,
         };
         let services = SessionServices {
@@ -2838,6 +3027,8 @@ mod tests {
             shell_environment_policy: config.shell_environment_policy.clone(),
             tools_config,
             is_review_mode: false,
+            is_subagent: false,
+            allowed_tools: None,
             final_output_json_schema: None,
         });
         let services = SessionServices {
@@ -3209,5 +3400,14 @@ mod tests {
 
         pretty_assertions::assert_eq!(exec_output.metadata, ResponseExecMetadata { exit_code: 0 });
         assert!(exec_output.output.contains("hi"));
+    }
+}
+fn map_tool_alias(input: &str) -> String {
+    match input.trim().to_lowercase().as_str() {
+        "bash" | "shell" => "unified_exec".to_string(),
+        "grep" => "grep_files".to_string(),
+        "read" => "read_file".to_string(),
+        "glob" | "list" => "list_dir".to_string(),
+        other => other.to_string(),
     }
 }

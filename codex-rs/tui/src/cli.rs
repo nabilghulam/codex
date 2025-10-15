@@ -72,6 +72,11 @@ pub struct Cli {
     #[arg(long = "search", default_value_t = false)]
     pub web_search: bool,
 
+    /// Define subagents dynamically for this session. Accepts a JSON object:
+    /// { "name": { "description": "...", "prompt": "...", "tools": ["Read", "Grep"], "model": "inherit" } }
+    #[arg(long = "agents", value_name = "JSON")]
+    pub agents_json: Option<String>,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }

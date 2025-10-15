@@ -451,6 +451,12 @@ impl ModelClient {
     pub fn get_auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.auth_manager.clone()
     }
+
+    /// Internal: return the Arc<Config> used to create this client. Intended for
+    /// constructing per‑turn clients with adjusted model/family.
+    pub fn get_config_arc(&self) -> Arc<Config> {
+        Arc::clone(&self.config)
+    }
 }
 
 enum StreamAttemptError {

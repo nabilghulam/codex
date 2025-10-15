@@ -730,6 +730,7 @@ pub(crate) fn build_specs(
     use crate::tools::handlers::TestSyncHandler;
     use crate::tools::handlers::UnifiedExecHandler;
     use crate::tools::handlers::ViewImageHandler;
+    use crate::tools::handlers::SubagentHandler;
     use std::sync::Arc;
 
     let mut builder = ToolRegistryBuilder::new();
@@ -741,6 +742,7 @@ pub(crate) fn build_specs(
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
+    let subagent_handler = Arc::new(SubagentHandler);
 
     if config.experimental_unified_exec_tool {
         builder.push_spec(create_unified_exec_tool());
@@ -775,6 +777,10 @@ pub(crate) fn build_specs(
         builder.push_spec(PLAN_TOOL.clone());
         builder.register_handler("update_plan", plan_handler);
     }
+
+    // Always include subagent delegation tool; it becomes effective when subagents are defined.
+    builder.push_spec(ToolSpec::Function(create_delegate_subagent_tool()));
+    builder.register_handler("delegate_to_subagent", subagent_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -852,6 +858,30 @@ pub(crate) fn build_specs(
     }
 
     builder
+}
+
+fn create_delegate_subagent_tool() -> ResponsesApiTool {
+    ResponsesApiTool {
+        name: "delegate_to_subagent".to_string(),
+        description: "Delegate a task to a named subagent with isolated context.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties: BTreeMap::from([
+                (
+                    "name".to_string(),
+                    JsonSchema::String { description: Some("Subagent name".to_string()) },
+                ),
+                (
+                    "prompt".to_string(),
+                    JsonSchema::String {
+                        description: Some("Task instruction for the subagent".to_string()),
+                    },
+                ),
+            ]),
+            required: Some(vec!["name".to_string(), "prompt".to_string()]),
+            additional_properties: None,
+        },
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,9 @@ pub enum SlashCommand {
     // more frequently used commands should be listed first.
     Model,
     Approvals,
+    Agents,
     Review,
+    UseAgent,
     New,
     Init,
     Compact,
@@ -36,7 +38,9 @@ impl SlashCommand {
             SlashCommand::New => "start a new chat during a conversation",
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
+            SlashCommand::Agents => "select a persona (agent) for this session",
             SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::UseAgent => "run a subagent for a specific task",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -63,10 +67,12 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Init
             | SlashCommand::Compact
+            | SlashCommand::Agents
             | SlashCommand::Undo
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
+            | SlashCommand::UseAgent
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention
